@@ -1,0 +1,134 @@
+import os
+import pandas as pd
+from tqdm import tqdm
+import torch
+from torchvision import transforms
+from torch.utils.data import DataLoader, Dataset
+from torchvision.datasets.folder import pil_loader
+import glob
+# from torchsampler import ImbalancedDatasetSampler
+
+data_cat = ['train', 'valid'] # data categories
+
+def get_study_level_data(study_type):
+    """
+    Returns a dict, with keys 'train' and 'valid' and respective values as study level dataframes, 
+    these dataframes contain three columns 'Path', 'Count', 'Label'
+    Args:
+        study_type (string): one of the seven study type folder names in 'train/valid/test' dataset 
+    """
+    study_data = {}
+    study_label = {'positive': 1, 'negative': 0}
+    for phase in data_cat:
+        BASE_DIR = 'C:/Adi/MURA-v1.1/MURA-v1.1/'+phase+'/'+study_type+'/'
+        patients = list(os.walk(BASE_DIR))[0][1] # list of patient folder names
+        study_data[phase] = pd.DataFrame(columns=['Path', 'Count', 'Label'])
+        i = 0
+        for patient in tqdm(patients): # for each patient folder
+            for study in os.listdir(BASE_DIR + patient): # for each study in that patient folder
+                label = study_label[study.split('_')[1]] # get label 0 or 1
+                path = BASE_DIR + patient + '/' + study + '/' # path to this study
+                study_data[phase].loc[i] = [path, len(glob.glob(path+'/image**')), label] # add new row
+                i+=1
+    return study_data
+
+class ImageDataset(Dataset):
+    """training dataset."""
+
+    def __init__(self, df, transform=None):
+        """
+        Args:
+            df (pd.DataFrame): a pandas DataFrame with image path and labels.
+            transform (callable, optional): Optional transform to be applied
+                on a sample.
+        """
+        self.df = df
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, idx):
+        study_path = self.df.iloc[idx, 0]
+        count = self.df.iloc[idx, 1]
+        images = []
+        for i in range(count):
+            image = pil_loader(study_path + 'image%s.png' % (i+1))
+            images.append(self.transform(image))
+        images = torch.stack(images)
+        label = self.df.iloc[idx, 2]
+        sample = {'images': images, 'label': label}
+        return sample
+
+def get_dataloaders(data, batch_size=8, study_level=False):
+    '''
+    Returns dataloader pipeline with data augmentation
+    '''
+    data_transforms = {
+        'train': transforms.Compose([
+                # transforms.Resize((299, 299)),
+                transforms.Resize((224, 224)),
+                # transforms.ColorJitter(0.4,0.4,0.4), #ColorJitter Function
+                transforms.RandomHorizontalFlip(),
+                transforms.RandomRotation(10),
+                transforms.ToTensor()
+                # ,torch_equalize()  #Histogram equalization function
+                ,transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]) 
+                ]),
+        'valid': transforms.Compose([
+            # transforms.Resize((299, 299)),
+            transforms.Resize((224, 224)),   #ColorJitter Function
+            # transforms.ColorJitter(0.4,0.4,0.4),
+            transforms.ToTensor()
+            # ,torch_equalize() #Histogram equalization function
+            ,transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+                ]),
+    }
+    image_datasets = {x: ImageDataset(data[x], transform=data_transforms[x]) for x in data_cat}
+    dataloaders = {x: DataLoader(image_datasets[x], batch_size=batch_size, num_workers=0, shuffle=True) for x in data_cat}
+#     , sampler=ImbalancedDatasetSampler(image_datasets[x])
+    return dataloaders
+
+class torch_equalize(object):
+    def __call__(self, image):
+        """
+        :param img: (PIL): Image 
+
+        :return: ycbr color space image (PIL)
+        """
+#        img = cv2.imread(img)  
+#        img = cv2.cvtColor(img, cv2.COLOR_BGR2ycbcr)
+        # t = torch.from_numpy(img)
+        # Assumes RGB for now.  Scales each channel independently
+        # and then stacks the result.
+        im = image
+        histo = torch.histc(im, bins=256)#.type(torch.int32)
+        # For the purposes of computing the step, filter out the nonzeros.
+        nonzero_histo = torch.reshape(histo[histo != 0], [-1])
+        step = (torch.sum(nonzero_histo) - nonzero_histo[-1]) // 255
+#         def build_lut(histo, step):
+            # Compute the cumulative sum, shifting by step // 2
+            # and then normalization by step.
+        lut = (torch.cumsum(histo, 0) + (step // 2)) // step
+            # Shift lut, prepending with 0.
+        lut = torch.cat([torch.zeros(1), lut[:-1]]) 
+            # Clip the counts to be in range.  This is done
+            # in the C code for image.point.
+        lut = torch.clamp(lut, 0, 255)
+
+        # If step is zero, return the original image.  Otherwise, build
+        # lut from the full histogram and step and then index from it.
+        if step == 0:
+            result = im
+        else:
+            # can't index using 2d index. Have to flatten and then reshape
+            result = torch.gather(lut, 0, (im/im.max()*255).flatten().long())
+            result = (result*im.max()/255).reshape_as(im)
+
+        return result
+#        return Image.fromarray(t)
+    def __repr__(self):
+        return self.__class__.__name__+'()'
+
+if __name__=='main':
+    pass
